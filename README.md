@@ -26,9 +26,10 @@ Auto Loop Finder - это инструмент для видеомонтажер
 2. Запустите `install_windows.bat`
 3. Готово!
 
-### MacOS
+### Linux
 ```bash
-chmod +x install_mac.sh
-./install_mac.sh
+chmod +x linux_install.sh
+./linux_install.sh
+```
 
 #дада я дебил еблан школьник навайбкодил залупу
