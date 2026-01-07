@@ -20,17 +20,17 @@ Auto Loop Finder - это инструмент для видеомонтажер
 - 🚀 **Быстрая работа** с интеллектуальной выборкой кадров
 
 ## 🎮 Возможности
-# Простой анализ
-python auto_loop_finder.py video.mp4
+- Простой анализ
+- python auto_loop_finder.py video.mp4
 
-# Создание превью цикла
-python auto_loop_finder.py video.mp4 --preview
+- Создание превью цикла
+- python auto_loop_finder.py video.mp4 --preview
 
-# Поиск циклов определенной длительности
-python auto_loop_finder.py video.mp4 --min-duration 1.0 --max-duration 3.0
+- Поиск циклов определенной длительности
+- python auto_loop_finder.py video.mp4 --min-duration 1.0 --max-duration 3.0
 
-# Использование метода детекции краев
-python auto_loop_finder.py video.mp4 --method edges
+- Использование метода детекции краев
+- python auto_loop_finder.py video.mp4 --method edges
 
 ## 🚀 Быстрая установка
 
