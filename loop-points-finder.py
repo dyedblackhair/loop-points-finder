@@ -12,8 +12,10 @@ import argparse
 import sys
 import tempfile
 import os
+import re
 from pathlib import Path
 import cv2
+import shutil
 
 class AutoLoopFinder:
     def __init__(self, video_path, ffmpeg_path="ffmpeg"):
@@ -30,7 +32,7 @@ class AutoLoopFinder:
         self.frames = None
         
     def get_video_info(self):
-        """Получить информацию о видеофайле"""
+        """Получить информацию о видеофайлу"""
         print("Получение информации о видео...")
         
         try:
@@ -81,7 +83,7 @@ class AutoLoopFinder:
                     cmd,
                     capture_output=True,
                     text=True,
-                    check=False  # ffmpeg всегда возвращает ошибку при использовании -i без выходного файла
+                    check=False
                 )
                 
                 # Парсим вывод ffmpeg
@@ -89,7 +91,7 @@ class AutoLoopFinder:
                 
                 # Извлекаем информацию
                 duration = 0
-                fps = 30.0  # значение по умолчанию
+                fps = 30.0
                 width = 1920
                 height = 1080
                 
@@ -97,7 +99,6 @@ class AutoLoopFinder:
                 for line in output.split('\n'):
                     if 'Duration:' in line:
                         try:
-                            # Формат: Duration: 00:00:10.00
                             time_str = line.split('Duration:')[1].split(',')[0].strip()
                             h, m, s = time_str.split(':')
                             duration = int(h) * 3600 + int(m) * 60 + float(s)
@@ -143,7 +144,6 @@ class AutoLoopFinder:
             except Exception as e:
                 print(f"Ошибка при получении информации о видео: {e}")
                 print("Использую значения по умолчанию...")
-                # Значения по умолчанию
                 self.video_info = {
                     'duration': 10.0,
                     'fps': 30.0,
@@ -203,7 +203,7 @@ class AutoLoopFinder:
             
             try:
                 # Запускаем ffmpeg для извлечения кадра
-                subprocess.run(cmd, capture_output=True, check=True)
+                subprocess.run(cmd, capture_output=True, check=True, timeout=10)
                 
                 # Читаем изображение через OpenCV
                 if os.path.exists(temp_image):
@@ -212,19 +212,16 @@ class AutoLoopFinder:
                     if frame is not None:
                         # Вычисляем сигнатуру в зависимости от метода
                         if method == "histogram":
-                            # Упрощенная гистограмма в grayscale
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
                             signature = hist.flatten()
                             
                         elif method == "grayscale":
-                            # Простое преобразование в grayscale и уменьшение
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             small = cv2.resize(gray, (32, 32))
                             signature = small.flatten().astype(float) / 255.0
                             
                         elif method == "edges":
-                            # Детектор краев Canny
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             edges = cv2.Canny(gray, 100, 200)
                             small = cv2.resize(edges, (32, 32))
@@ -241,7 +238,6 @@ class AutoLoopFinder:
                 
             except Exception as e:
                 print(f"  Ошибка при извлечении кадра {frame_idx}: {e}")
-                # Удаляем временный файл если он существует
                 if os.path.exists(temp_image):
                     os.remove(temp_image)
                 continue
@@ -296,14 +292,15 @@ class AutoLoopFinder:
                     'end_time': timestamps[j],
                     'duration': time_diff,
                     'raw_diff': diff,
-                    'norm_diff': normalized_diff
+                    'norm_diff': normalized_diff,
+                    'quality_score': 1.0 / (normalized_diff + 0.001)  # Счет качества (чем больше, тем лучше)
                 })
         
         if not best_pairs:
             print("Не найдено подходящих точек для цикла")
             return None
         
-        # Сортируем по нормализованной разнице
+        # Сортируем по нормализованной разнице (лучшие первыми)
         best_pairs.sort(key=lambda x: x['norm_diff'])
         
         # Берем топ-10 результатов
@@ -327,51 +324,251 @@ class AutoLoopFinder:
         duration = end_time - start_time
         
         try:
-            # Простой способ: вырезаем и повторяем 3 раза
+            # Вырезаем без перекодирования
             cmd = [
                 self.ffmpeg_path,
                 '-i', self.video_path,
                 '-ss', str(start_time),
                 '-t', str(duration),
-                '-filter_complex', '[0:v]loop=3:250[v];[0:a]aloop=3:1[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-c:a', 'aac',
-                '-shortest',
+                '-c', 'copy',  # Копируем без перекодирования
+                '-avoid_negative_ts', 'make_zero',
                 '-y',
                 output_path
             ]
             
-            print(f"Создаем превью: {start_time:.2f} - {end_time:.2f} (повтор 3 раза)")
-            subprocess.run(cmd, capture_output=True, check=True)
-            print(f"Превью сохранено в: {output_path}")
-            return True
+            print(f"Создаем превью: {start_time:.2f} - {end_time:.2f}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
-        except subprocess.CalledProcessError:
-            # Упрощенный вариант без звука
-            try:
-                cmd_simple = [
+            if result.returncode == 0:
+                print(f"✅ Превью сохранено без перекодирования: {output_path}")
+                
+                # Теперь создаем зацикленную версию
+                loop_preview_path = output_path.replace('.mp4', '_looped.mp4')
+                loop_cmd = [
                     self.ffmpeg_path,
-                    '-i', self.video_path,
-                    '-ss', str(start_time),
-                    '-t', str(duration),
-                    '-vf', 'loop=3:250',
-                    '-c:v', 'libx264',
-                    '-an',
+                    '-stream_loop', '2',  # Повторяем 2 раза + оригинал = 3 раза
+                    '-i', output_path,
+                    '-c', 'copy',
+                    '-fflags', '+genpts',
                     '-y',
-                    output_path
+                    loop_preview_path
                 ]
-                subprocess.run(cmd_simple, capture_output=True, check=True)
-                print(f"Превью сохранено (без звука) в: {output_path}")
-                return True
-            except:
-                print("Не удалось создать превью")
+                
+                try:
+                    subprocess.run(loop_cmd, capture_output=True, check=True, timeout=30)
+                    print(f"🔁 Зацикленная версия: {loop_preview_path}")
+                    return True
+                except:
+                    print(f"✅ Превью сохранено (без цикла): {output_path}")
+                    return True
+            else:
+                print(f"❌ Ошибка при создании превью")
                 return False
+                
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            return False
+    
+    def cut_video_segment_without_reencoding(self, start_time, end_time, output_path):
+        """
+        Вырезать сегмент видео БЕЗ ПЕРЕКОДИРОВАНИЯ (копирование потоков)
+        
+        Args:
+            start_time: время начала (секунды)
+            end_time: время конца (секунды)
+            output_path: путь для сохранения
+        """
+        duration = end_time - start_time
+        
+        try:
+            # Команда для вырезания без перекодирования
+            cmd = [
+                self.ffmpeg_path,
+                '-i', self.video_path,
+                '-ss', str(start_time),  # Время начала
+                '-t', str(duration),     # Длительность
+                '-c', 'copy',           # Копировать все потоки без перекодирования
+                '-avoid_negative_ts', 'make_zero',  # Избегать отрицательных временных меток
+                '-y',                   # Перезаписывать выходной файл
+                output_path
+            ]
+            
+            print(f"Вырезаю сегмент без перекодирования: {start_time:.2f} - {end_time:.2f} ({duration:.2f} сек)")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                # Проверяем размер файла
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path) / (1024 * 1024)  # В МБ
+                    print(f"  ✅ Сегмент сохранен: {output_path} ({file_size:.1f} MB)")
+                    return True
+                else:
+                    print(f"  ❌ Файл не создан")
+                    return False
+            else:
+                print(f"  ❌ Ошибка при вырезании")
+                if "accurate seeking" in result.stderr:
+                    print(f"  ⚠ Попробуем другой метод точного вырезания...")
+                    return self._cut_with_accurate_seek(start_time, end_time, output_path)
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print(f"  ❌ Таймаут при вырезании сегмента")
+            return False
+        except Exception as e:
+            print(f"  ❌ Ошибка: {e}")
+            return False
+    
+    def _cut_with_accurate_seek(self, start_time, end_time, output_path):
+        """
+        Альтернативный метод для точного вырезания
+        """
+        duration = end_time - start_time
+        
+        try:
+            # Используем другой подход для более точного вырезания
+            cmd = [
+                self.ffmpeg_path,
+                '-ss', str(start_time),  # Время начала ДО указания входного файла
+                '-i', self.video_path,
+                '-t', str(duration),
+                '-c', 'copy',
+                '-avoid_negative_ts', 'make_zero',
+                '-y',
+                output_path
+            ]
+            
+            print(f"  ⚡ Пробуем точное вырезание...")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                file_size = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"  ✅ Точное вырезание успешно: {output_path} ({file_size:.1f} MB)")
+                return True
+            else:
+                print(f"  ❌ Точное вырезание не удалось")
+                return False
+                
+        except Exception as e:
+            print(f"  ❌ Ошибка при точном вырезании: {e}")
+            return False
+    
+    def export_all_loops(self, loop_points, output_dir="loops"):
+        """
+        Экспортировать все найденные циклы в отдельные файлы БЕЗ ПЕРЕКОДИРОВАНИЯ
+        
+        Args:
+            loop_points: список найденных точек циклов
+            output_dir: директория для сохранения
+        """
+        print(f"\n{'='*60}")
+        print(f"Экспорт всех найденных циклов (без перекодирования)")
+        print(f"{'='*60}")
+        
+        # Создаем директорию для циклов
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Получаем имя исходного файла без расширения
+        video_name = Path(self.video_path).stem
+        video_name_clean = re.sub(r'[^\w\-_]', '_', video_name)  # Очищаем имя от спецсимволов
+        
+        exported_count = 0
+        
+        print(f"\nЭкспортируем циклы в папку: {output_dir}/")
+        print("⚠  Все циклы будут сохранены БЕЗ ПЕРЕКОДИРОВАНИЯ (исходное качество)")
+        
+        # Экспортируем циклы из top_by_normalized
+        for i, loop in enumerate(loop_points['top_by_normalized'], 1):
+            output_filename = f"{video_name_clean}_loop_{i:02d}_{loop['start_time']:.1f}-{loop['end_time']:.1f}s.mp4"
+            output_path = os.path.join(output_dir, output_filename)
+            
+            print(f"\nЦикл #{i}:")
+            print(f"  Время: {loop['start_time']:.2f} - {loop['end_time']:.2f}")
+            print(f"  Длительность: {loop['duration']:.2f} сек")
+            print(f"  Качество: {loop['norm_diff']:.4f}")
+            
+            if self.cut_video_segment_without_reencoding(loop['start_time'], loop['end_time'], output_path):
+                exported_count += 1
+        
+        # Экспортируем лучшие циклы из top_by_raw (уникальные, не дублирующие уже экспортированные)
+        raw_loops = loop_points['top_by_raw']
+        if len(raw_loops) > 0:
+            print(f"\n{'='*40}")
+            print(f"Дополнительные циклы (по визуальному сходству):")
+            print(f"{'='*40}")
+            
+            for i, loop in enumerate(raw_loops, 1):
+                # Проверяем, не экспортировали ли мы уже этот цикл
+                already_exported = False
+                for exported_loop in loop_points['top_by_normalized']:
+                    if (abs(loop['start_time'] - exported_loop['start_time']) < 0.1 and
+                        abs(loop['end_time'] - exported_loop['end_time']) < 0.1):
+                        already_exported = True
+                        break
+                
+                if not already_exported:
+                    output_filename = f"{video_name_clean}_raw_{i:02d}_{loop['start_time']:.1f}-{loop['end_time']:.1f}s.mp4"
+                    output_path = os.path.join(output_dir, output_filename)
+                    
+                    print(f"\nДоп. цикл #{i}:")
+                    print(f"  Время: {loop['start_time']:.2f} - {loop['end_time']:.2f}")
+                    print(f"  Длительность: {loop['duration']:.2f} сек")
+                    print(f"  Сходство: {loop['raw_diff']:.2f}")
+                    
+                    if self.cut_video_segment_without_reencoding(loop['start_time'], loop['end_time'], output_path):
+                        exported_count += 1
+        
+        print(f"\n{'='*60}")
+        print(f"✅ Экспортировано циклов: {exported_count}")
+        print(f"📁 Папка с циклами: {os.path.abspath(output_dir)}")
+        print(f"💡 Все циклы сохранены в ИСХОДНОМ КАЧЕСТВЕ (без перекодирования)")
+        print(f"{'='*60}")
+        
+        return exported_count
+    
+    def create_loops_summary(self, loop_points, output_dir="loops"):
+        """Создать текстовый файл с информацией о всех циклах"""
+        summary_path = os.path.join(output_dir, "loops_summary.txt")
+        
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write(f"Сводка по найденным циклам\n")
+            f.write(f"{'='*60}\n")
+            f.write(f"Исходное видео: {self.video_path}\n")
+            f.write(f"FPS: {self.video_info['fps']:.2f}\n")
+            f.write(f"Разрешение: {self.video_info['width']}x{self.video_info['height']}\n")
+            f.write(f"Общее время: {self.video_info['duration']:.2f} сек\n")
+            f.write(f"Все циклы сохранены БЕЗ ПЕРЕКОДИРОВАНИЯ (исходное качество)\n")
+            f.write(f"{'='*60}\n\n")
+            
+            f.write("ЛУЧШИЕ ЦИКЛЫ (по алгоритмическому качеству):\n")
+            f.write(f"{'='*60}\n")
+            for i, loop in enumerate(loop_points['top_by_normalized'], 1):
+                f.write(f"\nЦикл #{i}:\n")
+                f.write(f"  Начало: {loop['start_time']:.3f} сек (кадр {loop['start_idx']})\n")
+                f.write(f"  Конец:  {loop['end_time']:.3f} сек (кадр {loop['end_idx']})\n")
+                f.write(f"  Длительность: {loop['duration']:.3f} сек\n")
+                f.write(f"  Качество: {loop['norm_diff']:.4f} (меньше = лучше)\n")
+                f.write(f"  Сырое сходство: {loop['raw_diff']:.2f}\n")
+                f.write(f"  Файл: {Path(self.video_path).stem}_loop_{i:02d}_{loop['start_time']:.1f}-{loop['end_time']:.1f}s.mp4\n")
+            
+            f.write(f"\n{'='*60}\n")
+            f.write("ЦИКЛЫ ПО ВИЗУАЛЬНОМУ СХОДСТВУ:\n")
+            f.write(f"{'='*60}\n")
+            for i, loop in enumerate(loop_points['top_by_raw'], 1):
+                f.write(f"\nЦикл #{i} (визуальное):\n")
+                f.write(f"  Начало: {loop['start_time']:.3f} сек (кадр {loop['start_idx']})\n")
+                f.write(f"  Конец:  {loop['end_time']:.3f} сек (кадр {loop['end_idx']})\n")
+                f.write(f"  Длительность: {loop['duration']:.3f} сек\n")
+                f.write(f"  Сырое сходство: {loop['raw_diff']:.2f} (меньше = лучше)\n")
+                f.write(f"  Алгоритмическое качество: {loop['norm_diff']:.4f}\n")
+        
+        print(f"\n📄 Сводка сохранена: {summary_path}")
+        return summary_path
     
     def analyze(self, sample_rate=0.1, method="histogram", 
                 min_duration=0.5, max_duration=5.0,
-                create_preview=False):
+                create_preview=False, export_all=False):
         """
         Основной метод анализа
         
@@ -381,9 +578,12 @@ class AutoLoopFinder:
             min_duration: минимальная длительность цикла
             max_duration: максимальная длительность цикла
             create_preview: создать превью лучшего цикла
+            export_all: экспортировать все найденные циклы
         """
         print("=" * 60)
         print("Auto Loop Finder - поиск точек для идеального цикла")
+        print("=" * 60)
+        print("⚠  Экспорт циклов будет БЕЗ ПЕРЕКОДИРОВАНИЯ (исходное качество)")
         print("=" * 60)
         
         # Шаг 1: Получить информацию о видео
@@ -427,7 +627,7 @@ class AutoLoopFinder:
             print(f"   Длительность: {result['duration']:.3f} сек ({int(result['duration'] * self.video_info['fps'])} кадров)")
             print(f"   Качество: {result['norm_diff']:.4f} (меньше = лучше)")
         
-        print("\n\nЛучшие по визуальному сходству (сырая разница):")
+        print("\n\nЛучшие по визуальному сходству ( сырая разница):")
         for i, result in enumerate(results['top_by_raw'][:5], 1):
             print(f"\n{i}. Начало: {result['start_time']:.3f} сек (кадр {result['start_idx']})")
             print(f"   Конец:  {result['end_time']:.3f} сек (кадр {result['end_idx']})")
@@ -447,15 +647,25 @@ class AutoLoopFinder:
             print(f"  IN: кадр {best['start_idx']}")
             print(f"  OUT: кадр {best['end_idx'] - 1} (включительно)")
             
-            # Шаг 5: Создать превью (если нужно)
+            # Шаг 5: Создать превью лучшего цикла (если нужно)
             if create_preview:
                 preview_file = f"loop_preview_{best['start_idx']}_{best['end_idx']}.mp4"
                 self.generate_preview(best['start_idx'], best['end_idx'], preview_file)
-                
-                print(f"\nПревью создано: {preview_file}")
-                print("Совет: Добавьте кроссфейд на 1-3 кадра в DaVinci Resolve для более плавного перехода.")
+                print(f"\n📹 Превью лучшего цикла создано: {preview_file}")
         
-        # Сохранить результаты в файл
+        # Шаг 6: Экспортировать все циклы (если нужно)
+        if export_all:
+            exported_count = self.export_all_loops(results)
+            summary_path = self.create_loops_summary(results)
+            
+            if exported_count > 0:
+                print(f"\n🎉 Успешно экспортировано {exported_count} циклов!")
+                print(f"📂 Все циклы сохранены в папке: loops/")
+                print(f"📄 Сводка: {summary_path}")
+                print(f"💡 Сохранено БЕЗ ПЕРЕКОДИРОВАНИЯ - исходное качество")
+                print(f"\n💡 Совет: Используйте эти циклы в DaVinci Resolve или других видеоредакторах")
+        
+        # Шаг 7: Сохранить результаты в файл
         with open("loop_points.txt", "w", encoding='utf-8') as f:
             f.write(f"DaVinci Resolve Loop Points\n")
             f.write(f"Video: {self.video_path}\n")
@@ -467,9 +677,13 @@ class AutoLoopFinder:
                 f.write(f"   End:   {result['end_time']:.3f}s (frame {result['end_idx']})\n")
                 f.write(f"   Duration: {result['duration']:.3f}s\n")
                 f.write(f"   Quality: {result['norm_diff']:.4f}\n")
+            
+            if export_all:
+                f.write(f"\n\nВсе циклы экспортированы в папку: loops/\n")
+                f.write(f"Экспорт выполнен БЕЗ ПЕРЕКОДИРОВАНИЯ (исходное качество)\n")
         
-        print(f"\nРезультаты также сохранены в: loop_points.txt")
-        print("\nГотово! Используйте эти точки в DaVinci Resolve для создания цикла.")
+        print(f"\n📝 Результаты также сохранены в: loop_points.txt")
+        print("\n✅ Готово! Используйте эти точки в DaVinci Resolve для создания цикла.")
 
 
 def main():
@@ -482,6 +696,11 @@ def main():
   %(prog)s video.mp4 --method edges --sample-rate 0.2
   %(prog)s video.mp4 --min-duration 1.0 --max-duration 3.0 --preview
   %(prog)s video.mp4 --ffmpeg "C:\\ffmpeg\\bin\\ffmpeg.exe"
+  %(prog)s video.mp4 --export-all          # Экспортировать все циклы (без перекодирования)
+  %(prog)s video.mp4 --preview --export-all # Создать превью + экспорт
+
+ВАЖНО: При использовании --export-all циклы сохраняются БЕЗ ПЕРЕКОДИРОВАНИЯ
+        в исходном качестве видео и аудио.
         """
     )
     
@@ -498,6 +717,8 @@ def main():
                        help='Путь к ffmpeg (по умолчанию "ffmpeg")')
     parser.add_argument('--preview', action='store_true',
                        help='Создать превью лучшего цикла')
+    parser.add_argument('--export-all', action='store_true',
+                       help='Экспортировать все найденные циклы в отдельные файлы (без перекодирования)')
     
     args = parser.parse_args()
     
@@ -528,7 +749,8 @@ def main():
         method=args.method,
         min_duration=args.min_duration,
         max_duration=args.max_duration,
-        create_preview=args.preview
+        create_preview=args.preview,
+        export_all=args.export_all
     )
 
 
