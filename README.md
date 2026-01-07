@@ -30,3 +30,5 @@ Auto Loop Finder - это инструмент для видеомонтажер
 ```bash
 chmod +x install_mac.sh
 ./install_mac.sh
+
+#дада я дебил еблан школьник навайбкодил залупу
